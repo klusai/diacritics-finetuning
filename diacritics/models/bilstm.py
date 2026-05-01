@@ -31,27 +31,27 @@ def build_char_vocab(texts: list[str]) -> tuple[dict[str, int], dict[int, str]]:
 
 
 class CharDataset(Dataset):
+    """Pre-tokenized character dataset for efficient batching."""
+
     def __init__(self, pairs: list[tuple[str, str]], input_vocab: dict, output_vocab: dict,
                  max_len: int = 512):
-        self.pairs = pairs
-        self.input_vocab = input_vocab
-        self.output_vocab = output_vocab
         self.max_len = max_len
+        logger.info("Pre-tokenizing %d pairs...", len(pairs))
+        self.src_seqs = []
+        self.tgt_seqs = []
+        for src, tgt in pairs:
+            min_len = min(len(src), len(tgt), max_len)
+            src_ids = [input_vocab.get(c, 1) for c in src[:min_len]]
+            tgt_ids = [output_vocab.get(c, 1) for c in tgt[:min_len]]
+            self.src_seqs.append(torch.tensor(src_ids, dtype=torch.long))
+            self.tgt_seqs.append(torch.tensor(tgt_ids, dtype=torch.long))
+        logger.info("Pre-tokenization complete")
 
     def __len__(self):
-        return len(self.pairs)
+        return len(self.src_seqs)
 
     def __getitem__(self, idx):
-        src, tgt = self.pairs[idx]
-        src = src[:self.max_len]
-        tgt = tgt[:self.max_len]
-
-        min_len = min(len(src), len(tgt))
-        src, tgt = src[:min_len], tgt[:min_len]
-
-        src_ids = torch.tensor([self.input_vocab.get(c, 1) for c in src], dtype=torch.long)
-        tgt_ids = torch.tensor([self.output_vocab.get(c, 1) for c in tgt], dtype=torch.long)
-        return src_ids, tgt_ids
+        return self.src_seqs[idx], self.tgt_seqs[idx]
 
 
 def collate_fn(batch):
@@ -121,7 +121,8 @@ class BiLSTMModel:
         train_ds = CharDataset(pairs, self.input_vocab, self.output_vocab,
                                max_len=self.config.max_seq_length)
         train_loader = DataLoader(train_ds, batch_size=self.config.batch_size,
-                                  shuffle=True, collate_fn=collate_fn, num_workers=0)
+                                  shuffle=True, collate_fn=collate_fn,
+                                  num_workers=4, persistent_workers=True)
 
         self.model = BiLSTMRestorer(
             input_vocab_size=len(self.input_vocab),
@@ -138,12 +139,13 @@ class BiLSTMModel:
         param_count = sum(p.numel() for p in self.model.parameters())
         logger.info("BiLSTM parameters: %d (%.2f MB)", param_count, param_count * 4 / 1e6)
 
+        total_batches = len(train_loader)
         for epoch in range(self.config.max_epochs):
             self.model.train()
             total_loss = 0
             n_batches = 0
 
-            for src, tgt, lengths in train_loader:
+            for batch_idx, (src, tgt, lengths) in enumerate(train_loader):
                 src = src.to(self.device)
                 tgt = tgt.to(self.device)
 
@@ -157,6 +159,12 @@ class BiLSTMModel:
 
                 total_loss += loss.item()
                 n_batches += 1
+
+                if (batch_idx + 1) % 100 == 0:
+                    logger.info("Epoch %d/%d [%d/%d]: running_loss=%.4f",
+                                epoch + 1, self.config.max_epochs,
+                                batch_idx + 1, total_batches,
+                                total_loss / n_batches)
 
             avg_loss = total_loss / n_batches
             logger.info("Epoch %d/%d: loss=%.4f", epoch + 1, self.config.max_epochs, avg_loss)
