@@ -1,0 +1,51 @@
+# Model registry for diacritic restoration experiments
+# Each model family has a type and list of variants
+
+dictionary:
+  type: dictionary
+  variants:
+    - name: most-frequent-form
+      description: Word-level most-frequent diacritized form from training data
+
+bilstm:
+  type: bilstm
+  variants:
+    - name: bilstm-256
+      hidden_size: 256
+      num_layers: 2
+      char_embedding_dim: 64
+      dropout: 0.3
+
+bert:
+  type: bert_classifier
+  variants:
+    - name: bert-ro-cased
+      hf_id: dumitrescustefan/bert-base-romanian-cased-v1
+      params: 111M
+    - name: mbert-cased
+      hf_id: bert-base-multilingual-cased
+      params: 110M
+
+byt5:
+  type: byt5
+  variants:
+    - name: byt5-small
+      hf_id: google/byt5-small
+      params: 300M
+
+# Decoder-only LLMs for LoRA fine-tuning (pending model-selection research)
+decoder:
+  type: decoder_lm
+  variants:
+    - name: gemma-2-2b-it
+      hf_id: google/gemma-2-2b-it
+      params: 2B
+      lora_rank: 16
+    - name: llama-3.2-1b
+      hf_id: meta-llama/Llama-3.2-1B-Instruct
+      params: 1.2B
+      lora_rank: 16
+    - name: gemma-3-4b-it
+      hf_id: google/gemma-3-4b-it
+      params: 4B
+      lora_rank: 16

@@ -173,6 +173,9 @@ cython_debug/
 
 tinyfabulist.log
 
+# Cursor IDE
+.cursor/
+
 # Project-specific exclusions
 data/
 !data/.gitkeep

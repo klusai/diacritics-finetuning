@@ -1,0 +1,40 @@
+# Default training hyperparameters per model type
+
+bilstm:
+  max_epochs: 10
+  batch_size: 128
+  learning_rate: 0.001
+  hidden_size: 256
+  num_layers: 2
+  char_embedding_dim: 64
+  dropout: 0.3
+  max_seq_length: 512
+
+bert:
+  max_epochs: 5
+  batch_size: 16
+  learning_rate: 0.00003
+  max_seq_length: 256
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+
+byt5:
+  max_epochs: 5
+  batch_size: 8
+  learning_rate: 0.0001
+  max_seq_length: 512
+  use_cpu: true
+
+lora:
+  max_epochs: 3
+  batch_size: 4
+  learning_rate: 0.0002
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+  max_seq_length: 512
