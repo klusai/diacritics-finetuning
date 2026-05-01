@@ -1,0 +1,13 @@
+torch
+transformers
+peft
+accelerate
+datasets
+sentencepiece
+tokenizers
+scikit-learn
+click
+pyyaml
+tqdm
+pandas
+numpy
