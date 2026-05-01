@@ -143,5 +143,72 @@ def dictionary(data_dir, output_dir):
     evaluate_model(model.predict, data, out, "dictionary")
 
 
+@cli.command()
+@click.option("--data-dir", type=click.Path(exists=True), default="data/splits")
+@click.option("--output-dir", type=click.Path(), default="artifacts/bert")
+@click.option("--model-name", default="readerbench/RoBERT-base")
+@click.option("--epochs", type=int, default=5)
+@click.option("--batch-size", type=int, default=16)
+@click.option("--lr", type=float, default=3e-5)
+@click.option("--max-length", type=int, default=192)
+def bert(data_dir, output_dir, model_name, epochs, batch_size, lr, max_length):
+    """Train BERT token classification baseline."""
+    from diacritics.models.bert_classifier import BERTClassifierModel
+
+    data = Path(data_dir)
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    train_data = load_jsonl(data / "train.jsonl")
+    val_data = load_jsonl(data / "val.jsonl")
+    train_pairs = [(r["input"], r["target"]) for r in train_data]
+    val_pairs = [(r["input"], r["target"]) for r in val_data]
+
+    logger.info("Training BERT: %s, %d train, %d val", model_name, len(train_pairs), len(val_pairs))
+
+    model = BERTClassifierModel(model_name=model_name, max_length=max_length)
+    start = time.time()
+    model.train(train_pairs, val_pairs, epochs=epochs, lr=lr, batch_size=batch_size)
+    elapsed = time.time() - start
+    logger.info("Training completed in %.1f seconds (%.1f minutes)", elapsed, elapsed / 60)
+
+    model.save(out)
+    evaluate_model(model.predict, data, out, f"bert-{model_name.split('/')[-1]}")
+
+
+@cli.command()
+@click.option("--data-dir", type=click.Path(exists=True), default="data/splits")
+@click.option("--output-dir", type=click.Path(), default="artifacts/byt5")
+@click.option("--model-name", default="google/byt5-small")
+@click.option("--epochs", type=int, default=5)
+@click.option("--batch-size", type=int, default=8)
+@click.option("--lr", type=float, default=1e-3)
+@click.option("--max-length", type=int, default=384)
+@click.option("--use-cpu/--use-mps", default=True)
+def byt5(data_dir, output_dir, model_name, epochs, batch_size, lr, max_length, use_cpu):
+    """Train ByT5 seq2seq baseline."""
+    from diacritics.models.byt5 import ByT5Model
+
+    data = Path(data_dir)
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    train_data = load_jsonl(data / "train.jsonl")
+    val_data = load_jsonl(data / "val.jsonl")
+    train_pairs = [(r["input"], r["target"]) for r in train_data]
+    val_pairs = [(r["input"], r["target"]) for r in val_data]
+
+    logger.info("Training ByT5: %s, %d train, %d val", model_name, len(train_pairs), len(val_pairs))
+
+    model = ByT5Model(model_name=model_name, max_length=max_length)
+    start = time.time()
+    model.train(train_pairs, val_pairs, epochs=epochs, lr=lr, batch_size=batch_size, use_cpu=use_cpu)
+    elapsed = time.time() - start
+    logger.info("Training completed in %.1f seconds (%.1f minutes)", elapsed, elapsed / 60)
+
+    model.save(out)
+    evaluate_model(model.predict, data, out, f"byt5-{model_name.split('/')[-1]}")
+
+
 if __name__ == "__main__":
     cli()
