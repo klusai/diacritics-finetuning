@@ -177,10 +177,10 @@ tinyfabulist.log
 .cursor/
 
 # Project-specific exclusions
-data/
-!data/.gitkeep
-artifacts/
-!artifacts/.gitkeep
+/data/
+!/data/.gitkeep
+/artifacts/
+!/artifacts/.gitkeep
 *.jsonl
 *.parquet
 *.gguf
