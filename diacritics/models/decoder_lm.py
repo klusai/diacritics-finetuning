@@ -19,7 +19,7 @@ def format_completion_pair(stripped: str, diacritized: str) -> dict:
     """Format a training pair for mlx_lm completions format."""
     return {
         "prompt": RESTORE_TEMPLATE.format(input=stripped),
-        "completion": " " + diacritized,
+        "completion": " " + diacritized + "\n",
     }
 
 
@@ -130,11 +130,14 @@ class MLXDecoderLM:
         prompt = RESTORE_TEMPLATE.format(input=text)
         result = generate(
             self._model, self._tokenizer, prompt=prompt,
-            max_tokens=max_tokens, temp=0.0,
+            max_tokens=max_tokens,
         )
         result = result.strip()
         if result.startswith("Output:"):
             result = result[7:].strip()
+        result = result.split("\n")[0].strip()
+        if len(result) > len(text) * 1.5:
+            result = result[:len(text) + 20]
         return result
 
     @staticmethod
