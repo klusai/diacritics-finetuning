@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate LoRA models using MLX inference with optimized generation."""
+"""Evaluate LoRA models using MLX batch_generate for fast inference."""
 
 import json
 import logging
@@ -16,18 +16,21 @@ def load_jsonl(path):
     return [json.loads(l) for l in open(path) if l.strip()]
 
 
+PROMPT_TEMPLATE = "Restore diacritics: {input}\n"
+
+
 @click.command()
 @click.option("--model", required=True, help="Base model HF ID")
 @click.option("--adapter-path", required=True, help="Path to LoRA adapters dir")
 @click.option("--data-dir", default="data/splits", help="Data splits directory")
 @click.option("--output-dir", required=True, help="Output directory for results")
 @click.option("--name", required=True, help="Model name for logging")
-def main(model, adapter_path, data_dir, output_dir, name):
-    from mlx_lm import load, generate
+@click.option("--batch-size", default=32, help="Continuous batching size")
+def main(model, adapter_path, data_dir, output_dir, name, batch_size):
+    from mlx_lm import load, batch_generate
     from diacritics.evaluation.metrics import evaluate_batch, aggregate_scores
     from diacritics.evaluation.per_char import per_char_scores, format_per_char_report
     from diacritics.evaluation.error_analysis import analyze_errors, ai_confusion_rates, format_error_report
-    from diacritics.evaluation.speed import benchmark_speed
 
     data = Path(data_dir)
     out = Path(output_dir)
@@ -36,12 +39,20 @@ def main(model, adapter_path, data_dir, output_dir, name):
     logger.info("Loading %s with adapter %s", model, adapter_path)
     mlx_model, tokenizer = load(model, adapter_path=adapter_path)
 
-    prompt_template = "Restore diacritics: {input}\n"
-
-    def predict(text):
-        prompt = prompt_template.format(input=text)
-        result = generate(mlx_model, tokenizer, prompt=prompt, max_tokens=len(text) + 50)
-        return result.split("\n")[0].strip()
+    def predict_batch(texts):
+        prompts = [tokenizer.encode(PROMPT_TEMPLATE.format(input=t)) for t in texts]
+        max_tokens = max(len(t) for t in texts) + 50
+        resp = batch_generate(
+            mlx_model, tokenizer,
+            prompts=prompts,
+            max_tokens=max_tokens,
+            completion_batch_size=batch_size,
+        )
+        results = []
+        for text in resp.texts:
+            clean = text.split("\n")[0].strip()
+            results.append(clean)
+        return results
 
     all_results = {}
 
@@ -51,9 +62,9 @@ def main(model, adapter_path, data_dir, output_dir, name):
         inputs = [r["input"] for r in test_data]
         golds = [r["target"] for r in test_data]
 
-        logger.info("Evaluating %s (%d items)", test_name, len(inputs))
+        logger.info("Evaluating %s (%d items, batch_size=%d)", test_name, len(inputs), batch_size)
         start = time.time()
-        preds = [predict(inp) for inp in inputs]
+        preds = predict_batch(inputs)
         elapsed = time.time() - start
         logger.info("%s: %.1fs (%.1f items/s)", test_name, elapsed, len(inputs) / elapsed)
 
@@ -71,16 +82,15 @@ def main(model, adapter_path, data_dir, output_dir, name):
     clean_test = next((f for f in data.glob("test_*clean*") if "crawler" in f.stem), None)
     if clean_test:
         test_data = load_jsonl(clean_test)
-        inputs = [r["input"] for r in test_data]
         golds = [r["target"] for r in test_data]
-        preds = [json.loads(l)["prediction"] for l in open(out / f"predictions_{clean_test.stem}.jsonl")]
+        preds_clean = [json.loads(l)["prediction"] for l in open(out / f"predictions_{clean_test.stem}.jsonl")]
 
-        cs = per_char_scores(golds, preds)
+        cs = per_char_scores(golds, preds_clean)
         with open(out / "per_char_report.md", "w") as f:
             f.write(format_per_char_report(cs))
 
-        es = analyze_errors(golds, preds)
-        ai = ai_confusion_rates(golds, preds)
+        es = analyze_errors(golds, preds_clean)
+        ai = ai_confusion_rates(golds, preds_clean)
         with open(out / "error_report.md", "w") as f:
             f.write(format_error_report(es))
             if ai:
@@ -88,8 +98,17 @@ def main(model, adapter_path, data_dir, output_dir, name):
                 for k, v in sorted(ai.items()):
                     f.write(f"- {k}: {v}\n")
 
-        speed = benchmark_speed(predict, inputs[:100], warmup=3, label=name)
-        all_results["speed"] = speed
+    # Speed: single-item for fair comparison with other models
+    from mlx_lm import generate
+    def predict_single(text):
+        prompt = PROMPT_TEMPLATE.format(input=text)
+        result = generate(mlx_model, tokenizer, prompt=prompt, max_tokens=len(text) + 50)
+        return result.split("\n")[0].strip()
+
+    from diacritics.evaluation.speed import benchmark_speed
+    test_data = load_jsonl(clean_test)
+    speed = benchmark_speed(predict_single, [r["input"] for r in test_data][:100], warmup=3, label=name)
+    all_results["speed"] = speed
 
     with open(out / "results.json", "w") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
