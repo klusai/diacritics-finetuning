@@ -12,14 +12,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-RESTORE_TEMPLATE = "Restaurează diacriticele în textul următor. Returnează DOAR textul restaurat.\n\nInput: {input}\nOutput:"
+RESTORE_TEMPLATE = "Restore diacritics: {input}\n"
 
 
 def format_completion_pair(stripped: str, diacritized: str) -> dict:
     """Format a training pair for mlx_lm completions format."""
     return {
         "prompt": RESTORE_TEMPLATE.format(input=stripped),
-        "completion": " " + diacritized + "\n",
+        "completion": diacritized + "\n",
     }
 
 
@@ -86,8 +86,7 @@ class DecoderLMPredictor:
                 max_tokens=len(text) * 3,
             )
             result = response.choices[0].message.content.strip()
-            if result.startswith("Output:"):
-                result = result[7:].strip()
+            result = result.split("\n")[0].strip()
             return result
         except Exception as e:
             logger.error("Prediction error for model %s: %s", self.model, e)
@@ -132,12 +131,7 @@ class MLXDecoderLM:
             self._model, self._tokenizer, prompt=prompt,
             max_tokens=max_tokens,
         )
-        result = result.strip()
-        if result.startswith("Output:"):
-            result = result[7:].strip()
         result = result.split("\n")[0].strip()
-        if len(result) > len(text) * 1.5:
-            result = result[:len(text) + 20]
         return result
 
     @staticmethod
