@@ -210,5 +210,39 @@ def byt5(data_dir, output_dir, model_name, epochs, batch_size, lr, max_length, u
     evaluate_model(model.predict, data, out, f"byt5-{model_name.split('/')[-1]}")
 
 
+@cli.command()
+@click.option("--data-dir", type=click.Path(exists=True), default="data/splits")
+@click.option("--output-dir", type=click.Path(), default="artifacts/lora")
+@click.option("--model-name", required=True, help="HuggingFace model ID")
+@click.option("--experiment-name", required=True, help="Name for this experiment")
+@click.option("--rank", type=int, default=16)
+@click.option("--alpha", type=int, default=32)
+@click.option("--epochs", type=int, default=3)
+@click.option("--batch-size", type=int, default=4)
+@click.option("--lr", type=float, default=2e-4)
+def lora(data_dir, output_dir, model_name, experiment_name, rank, alpha, epochs, batch_size, lr):
+    """Train a decoder-only LLM with LoRA via MLX."""
+    from diacritics.training.lora import LoRAExperiment, run_lora_experiment
+    from diacritics.models.decoder_lm import MLXDecoderLM
+
+    data = Path(data_dir)
+    out = Path(output_dir)
+
+    train_data = load_jsonl(data / "train.jsonl")
+    train_pairs = [(r["input"], r["target"]) for r in train_data]
+
+    config = LoRAExperiment(
+        model_name=model_name, experiment_name=experiment_name,
+        rank=rank, alpha=alpha, epochs=epochs,
+        learning_rate=lr, batch_size=batch_size,
+    )
+
+    logger.info("LoRA experiment: %s on %s (%d pairs)", experiment_name, model_name, len(train_pairs))
+    fused_dir = run_lora_experiment(config, train_pairs, out)
+
+    mlx_model = MLXDecoderLM(str(fused_dir))
+    evaluate_model(mlx_model.predict, data, out / experiment_name, experiment_name)
+
+
 if __name__ == "__main__":
     cli()
