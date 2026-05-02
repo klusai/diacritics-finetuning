@@ -82,6 +82,7 @@ class CharClassificationDataset(Dataset):
             )
 
             offsets = enc.pop("offset_mapping").squeeze(0).tolist()
+            enc.pop("token_type_ids", None)
             input_ids = enc["input_ids"].squeeze(0)
             attention_mask = enc["attention_mask"].squeeze(0)
 
@@ -204,6 +205,7 @@ class BERTClassifierModel:
             return_offsets_mapping=True,
         )
         offsets = enc.pop("offset_mapping").squeeze(0).tolist()
+        enc.pop("token_type_ids", None)
         enc = {k: v.to(self.device) for k, v in enc.items()}
 
         with torch.no_grad():
