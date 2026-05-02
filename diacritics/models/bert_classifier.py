@@ -1,250 +1,248 @@
-"""BERT-based token classification for Romanian diacritic restoration.
+"""BERT-based character classification for Romanian diacritic restoration.
 
-Uses the Naplava et al. instruction-per-subword approach: for each subword
-token, predict a diacritization instruction that maps the undiacritized form
-to the diacritized one. Instructions are generated automatically from aligned
-training pairs.
+Tokenizes the diacritized (gold) text with BERT, then for each character
+position, predicts which diacritic action to apply. This avoids the
+subword alignment problem where stripped text tokenizes differently
+from diacritized text in Romanian BERT.
+
+The approach: feed the gold tokenization to BERT during training (teacher
+forcing), and at inference time feed the stripped text. The model learns
+to predict diacritics from context regardless of whether the input has them.
 """
 
 import json
 import logging
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "readerbench/RoBERT-base"
 
+DIACRITIC_ACTIONS = {
+    "a": ["a", "ă", "â"],
+    "i": ["i", "î"],
+    "s": ["s", "ș"],
+    "t": ["t", "ț"],
+    "A": ["A", "Ă", "Â"],
+    "I": ["I", "Î"],
+    "S": ["S", "Ș"],
+    "T": ["T", "Ț"],
+}
 
-def build_instruction_vocab(
-    pairs: list[tuple[str, str]], tokenizer, min_count: int = 2
-) -> dict[str, int]:
-    """Build instruction vocabulary from (stripped, diacritized) pairs.
+ALL_LABELS = ["<PAD>", "<IDENTITY>"]
+for base_char, variants in DIACRITIC_ACTIONS.items():
+    for v in variants:
+        if v != base_char:
+            label = f"{base_char}>{v}"
+            if label not in ALL_LABELS:
+                ALL_LABELS.append(label)
 
-    An instruction is the transformation needed to convert a stripped
-    subword token to its diacritized form. Most common instruction is
-    identity (no change needed).
-    """
-    instruction_counts = Counter()
-
-    for stripped, diacritized in pairs:
-        stripped_tokens = tokenizer.tokenize(stripped)
-        diac_tokens = tokenizer.tokenize(diacritized)
-
-        if len(stripped_tokens) != len(diac_tokens):
-            instruction_counts["<IDENTITY>"] += len(stripped_tokens)
-            continue
-
-        for st, dt in zip(stripped_tokens, diac_tokens):
-            instr = _compute_instruction(st, dt)
-            instruction_counts[instr] += 1
-
-    vocab = {"<PAD>": 0, "<IDENTITY>": 1}
-    for instr, count in instruction_counts.most_common():
-        if instr in vocab:
-            continue
-        if count >= min_count:
-            vocab[instr] = len(vocab)
-
-    logger.info("Instruction vocab: %d instructions (from %d unique, min_count=%d)",
-                len(vocab), len(instruction_counts), min_count)
-    return vocab
+LABEL2ID = {l: i for i, l in enumerate(ALL_LABELS)}
+ID2LABEL = {i: l for l, i in LABEL2ID.items()}
 
 
-def _compute_instruction(stripped_token: str, diac_token: str) -> str:
-    """Compute the diacritization instruction for a token pair."""
-    s = stripped_token.replace("##", "").replace("▁", "")
-    d = diac_token.replace("##", "").replace("▁", "")
-
-    if s == d:
+def char_label(stripped_char: str, gold_char: str) -> str:
+    if stripped_char == gold_char:
         return "<IDENTITY>"
-
-    changes = []
-    min_len = min(len(s), len(d))
-    for i in range(min_len):
-        if s[i] != d[i]:
-            changes.append(f"{i}:{s[i]}>{d[i]}")
-
-    if not changes:
-        return "<IDENTITY>"
-    return "|".join(changes)
+    key = f"{stripped_char}>{gold_char}"
+    if key in LABEL2ID:
+        return key
+    return "<IDENTITY>"
 
 
-def apply_instruction(token: str, instruction: str) -> str:
-    """Apply a diacritization instruction to a token."""
-    if instruction == "<IDENTITY>" or instruction == "<PAD>":
-        return token
-
-    clean = token.replace("##", "").replace("▁", "")
-    prefix = token[:len(token) - len(clean)]
-    chars = list(clean)
-
-    for change in instruction.split("|"):
-        parts = change.split(":")
-        if len(parts) != 2:
-            continue
-        pos = int(parts[0])
-        mapping = parts[1].split(">")
-        if len(mapping) != 2:
-            continue
-        if pos < len(chars):
-            chars[pos] = mapping[1]
-
-    return prefix + "".join(chars)
+def apply_label(char: str, label: str) -> str:
+    if label == "<IDENTITY>" or label == "<PAD>":
+        return char
+    parts = label.split(">")
+    if len(parts) == 2 and parts[0].lower() == char.lower():
+        if char.isupper() and parts[1].islower():
+            return parts[1].upper()
+        return parts[1]
+    return char
 
 
-class InstructionDataset(Dataset):
-    """Dataset for BERT token classification with diacritization instructions."""
+class CharClassificationDataset(Dataset):
+    """Tokenize text with BERT, then produce per-character diacritic labels."""
 
-    def __init__(self, pairs, tokenizer, instruction_vocab, max_length=192):
-        self.encodings = []
-        self.labels = []
-        self.tokenizer = tokenizer
-        self.instruction_vocab = instruction_vocab
+    def __init__(self, pairs: list[tuple[str, str]], tokenizer, max_length: int = 256):
+        self.items = []
         self.max_length = max_length
 
-        identity_id = instruction_vocab.get("<IDENTITY>", 1)
-
-        for stripped, diacritized in pairs:
+        for stripped, gold in pairs:
             enc = tokenizer(
                 stripped, truncation=True, max_length=max_length,
                 padding="max_length", return_tensors="pt",
+                return_offsets_mapping=True,
             )
 
-            stripped_tokens = tokenizer.tokenize(stripped)[:max_length - 2]
-            diac_tokens = tokenizer.tokenize(diacritized)[:max_length - 2]
+            offsets = enc.pop("offset_mapping").squeeze(0).tolist()
+            input_ids = enc["input_ids"].squeeze(0)
+            attention_mask = enc["attention_mask"].squeeze(0)
 
-            label_ids = [0]  # CLS
-            if len(stripped_tokens) == len(diac_tokens):
-                for st, dt in zip(stripped_tokens, diac_tokens):
-                    instr = _compute_instruction(st, dt)
-                    label_ids.append(instruction_vocab.get(instr, identity_id))
-            else:
-                label_ids.extend([identity_id] * len(stripped_tokens))
+            labels = torch.zeros(max_length, dtype=torch.long)
 
-            while len(label_ids) < max_length - 1:
-                label_ids.append(0)  # padding
-            label_ids.append(0)  # SEP
-            label_ids = label_ids[:max_length]
+            min_len = min(len(stripped), len(gold))
+            for tok_idx, (start, end) in enumerate(offsets):
+                if start == end:
+                    continue
+                for char_pos in range(start, min(end, min_len)):
+                    sc = stripped[char_pos] if char_pos < len(stripped) else ""
+                    gc = gold[char_pos] if char_pos < len(gold) else sc
+                    lbl = char_label(sc, gc)
+                    if lbl != "<IDENTITY>":
+                        labels[tok_idx] = LABEL2ID[lbl]
+                        break  # one diacritic action per token
 
-            self.encodings.append({k: v.squeeze(0) for k, v in enc.items()})
-            self.labels.append(torch.tensor(label_ids, dtype=torch.long))
+            self.items.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            })
 
     def __len__(self):
-        return len(self.labels)
+        return len(self.items)
 
     def __getitem__(self, idx):
-        item = {k: v for k, v in self.encodings[idx].items()}
-        item["labels"] = self.labels[idx]
-        return item
+        return self.items[idx]
+
+
+class BERTDiacriticHead(nn.Module):
+    def __init__(self, bert_model, num_labels: int):
+        super().__init__()
+        self.bert = bert_model
+        hidden = self.bert.config.hidden_size
+        self.classifier = nn.Linear(hidden, num_labels)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, input_ids, attention_mask, labels=None):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        hidden_states = self.dropout(outputs.last_hidden_state)
+        logits = self.classifier(hidden_states)
+
+        loss = None
+        if labels is not None:
+            loss_fn = nn.CrossEntropyLoss(ignore_index=0)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+        return {"loss": loss, "logits": logits}
 
 
 class BERTClassifierModel:
     """High-level wrapper for BERT-based diacritic restoration."""
 
-    def __init__(self, model_name: str = DEFAULT_MODEL, max_length: int = 192):
+    def __init__(self, model_name: str = DEFAULT_MODEL, max_length: int = 256):
         self.model_name = model_name
         self.max_length = max_length
         self.model = None
         self.tokenizer = None
-        self.instruction_vocab = None
-        self.idx_to_instruction = None
+        self.device = None
+
+    def _select_device(self):
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            logger.info("Using MPS")
+        else:
+            self.device = torch.device("cpu")
+            logger.info("Using CPU")
 
     def train(self, pairs: list[tuple[str, str]], val_pairs: list[tuple[str, str]] | None = None,
               epochs: int = 5, lr: float = 3e-5, batch_size: int = 16):
-        from transformers import (
-            AutoModelForTokenClassification, AutoTokenizer,
-            Trainer, TrainingArguments,
-        )
-
+        self._select_device()
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.instruction_vocab = build_instruction_vocab(pairs, self.tokenizer)
-        self.idx_to_instruction = {v: k for k, v in self.instruction_vocab.items()}
+        bert = AutoModel.from_pretrained(self.model_name)
+        self.model = BERTDiacriticHead(bert, num_labels=len(ALL_LABELS)).to(self.device)
 
-        self.model = AutoModelForTokenClassification.from_pretrained(
-            self.model_name, num_labels=len(self.instruction_vocab),
-        )
+        param_count = sum(p.numel() for p in self.model.parameters())
+        logger.info("BERT + head: %d params (%.1fM)", param_count, param_count / 1e6)
 
         logger.info("Building training dataset (%d pairs)...", len(pairs))
-        train_ds = InstructionDataset(pairs, self.tokenizer, self.instruction_vocab, self.max_length)
+        train_ds = CharClassificationDataset(pairs, self.tokenizer, self.max_length)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
 
-        eval_ds = None
-        if val_pairs:
-            logger.info("Building validation dataset (%d pairs)...", len(val_pairs))
-            eval_ds = InstructionDataset(val_pairs[:5000], self.tokenizer, self.instruction_vocab, self.max_length)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=0.01)
+        total_steps = len(train_loader) * epochs
+        logger.info("Training: %d epochs, %d steps/epoch, %d total", epochs, len(train_loader), total_steps)
 
-        args = TrainingArguments(
-            output_dir="artifacts/bert_training",
-            num_train_epochs=epochs,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
-            learning_rate=lr,
-            weight_decay=0.01,
-            warmup_ratio=0.1,
-            logging_steps=100,
-            eval_strategy="epoch" if eval_ds else "no",
-            save_strategy="epoch",
-            load_best_model_at_end=bool(eval_ds),
-            fp16=False,
-            dataloader_num_workers=0,
-            report_to="none",
-        )
+        for epoch in range(epochs):
+            self.model.train()
+            total_loss = 0
+            n_batches = 0
 
-        trainer = Trainer(
-            model=self.model, args=args,
-            train_dataset=train_ds, eval_dataset=eval_ds,
-        )
+            for batch_idx, batch in enumerate(train_loader):
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                out = self.model(**batch)
+                loss = out["loss"]
 
-        logger.info("Starting BERT training: %s, %d epochs, lr=%s", self.model_name, epochs, lr)
-        trainer.train()
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                optimizer.step()
+
+                total_loss += loss.item()
+                n_batches += 1
+
+                if (batch_idx + 1) % 200 == 0:
+                    logger.info("Epoch %d/%d [%d/%d]: loss=%.4f",
+                                epoch + 1, epochs, batch_idx + 1, len(train_loader),
+                                total_loss / n_batches)
+
+            logger.info("Epoch %d/%d: loss=%.4f", epoch + 1, epochs, total_loss / n_batches)
 
     def predict(self, text: str) -> str:
-        """Predict diacritized text from stripped input."""
         if self.model is None:
             raise RuntimeError("Model not trained or loaded")
 
         self.model.eval()
-        device = next(self.model.parameters()).device
-
-        enc = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=self.max_length)
-        enc = {k: v.to(device) for k, v in enc.items()}
+        enc = self.tokenizer(
+            text, return_tensors="pt", truncation=True, max_length=self.max_length,
+            return_offsets_mapping=True,
+        )
+        offsets = enc.pop("offset_mapping").squeeze(0).tolist()
+        enc = {k: v.to(self.device) for k, v in enc.items()}
 
         with torch.no_grad():
-            logits = self.model(**enc).logits
+            logits = self.model(**enc)["logits"]
             pred_ids = logits.argmax(dim=-1).squeeze(0).cpu().tolist()
 
-        tokens = self.tokenizer.convert_ids_to_tokens(enc["input_ids"].squeeze(0).cpu().tolist())
-
-        restored_tokens = []
-        for tok, pid in zip(tokens, pred_ids):
-            if tok in ("[CLS]", "[SEP]", "<s>", "</s>", "[PAD]", "<pad>"):
+        chars = list(text)
+        for tok_idx, (start, end) in enumerate(offsets):
+            if start == end:
                 continue
-            instr = self.idx_to_instruction.get(pid, "<IDENTITY>")
-            restored_tokens.append(apply_instruction(tok, instr))
+            label = ID2LABEL.get(pred_ids[tok_idx], "<IDENTITY>")
+            if label not in ("<PAD>", "<IDENTITY>"):
+                base_char = label.split(">")[0] if ">" in label else ""
+                for char_pos in range(start, min(end, len(chars))):
+                    if chars[char_pos].lower() == base_char.lower():
+                        chars[char_pos] = apply_label(chars[char_pos], label)
+                        break
 
-        return self.tokenizer.convert_tokens_to_string(restored_tokens)
+        return "".join(chars)
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(path / "model")
-        self.tokenizer.save_pretrained(path / "model")
-        with open(path / "instruction_vocab.json", "w", encoding="utf-8") as f:
-            json.dump(self.instruction_vocab, f, ensure_ascii=False)
+        torch.save(self.model.state_dict(), path / "model.pt")
+        self.tokenizer.save_pretrained(path / "tokenizer")
+        with open(path / "config.json", "w") as f:
+            json.dump({"model_name": self.model_name, "max_length": self.max_length,
+                        "num_labels": len(ALL_LABELS), "labels": ALL_LABELS}, f)
         logger.info("Saved BERT model to %s", path)
 
     @classmethod
-    def load(cls, path: Path, model_name: str = DEFAULT_MODEL) -> "BERTClassifierModel":
-        from transformers import AutoModelForTokenClassification, AutoTokenizer
-
-        inst = cls(model_name)
-        inst.model = AutoModelForTokenClassification.from_pretrained(path / "model")
-        inst.tokenizer = AutoTokenizer.from_pretrained(path / "model")
-        with open(path / "instruction_vocab.json", encoding="utf-8") as f:
-            inst.instruction_vocab = json.load(f)
-        inst.idx_to_instruction = {int(v): k for k, v in inst.instruction_vocab.items()}
+    def load(cls, path: Path) -> "BERTClassifierModel":
+        with open(path / "config.json") as f:
+            cfg = json.load(f)
+        inst = cls(cfg["model_name"], cfg["max_length"])
+        inst._select_device()
+        inst.tokenizer = AutoTokenizer.from_pretrained(path / "tokenizer")
+        bert = AutoModel.from_pretrained(cfg["model_name"])
+        inst.model = BERTDiacriticHead(bert, num_labels=cfg["num_labels"]).to(inst.device)
+        inst.model.load_state_dict(torch.load(path / "model.pt", map_location=inst.device))
+        inst.model.eval()
         logger.info("Loaded BERT model from %s", path)
         return inst
