@@ -89,7 +89,7 @@ class ByT5Model:
             fp16=False,
             use_cpu=use_cpu,
             dataloader_num_workers=0,
-            gradient_accumulation_steps=8,
+            gradient_accumulation_steps=2,
             report_to="none",
         )
 
