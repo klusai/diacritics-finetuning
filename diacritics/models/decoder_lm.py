@@ -120,13 +120,15 @@ class MLXDecoderLM:
             self._model, self._tokenizer = load(self.model_name)
         logger.info("Loaded %s (adapter: %s)", self.model_name, self.adapter_path)
 
-    def predict(self, text: str, max_tokens: int = 512) -> str:
+    def predict(self, text: str, max_tokens: int | None = None) -> str:
         """Generate diacritized text using MLX inference."""
         if self._model is None:
             self.load()
 
         from mlx_lm import generate
         prompt = RESTORE_TEMPLATE.format(input=text)
+        if max_tokens is None:
+            max_tokens = len(text) + 50
         result = generate(
             self._model, self._tokenizer, prompt=prompt,
             max_tokens=max_tokens,
