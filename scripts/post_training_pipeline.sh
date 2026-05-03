@@ -82,6 +82,7 @@ for model in dictionary bilstm bert_v2 byt5 prompting; do
 done
 mkdir -p $PAPER_RESULTS/lora/qwen3-1.7b-v2
 mkdir -p $PAPER_RESULTS/lora/llmic-v2
+mkdir -p $PAPER_RESULTS/base-llmic-v2
 
 # Copy results, reports
 for model in dictionary bilstm bert_v2 byt5; do
@@ -102,6 +103,16 @@ for lora_model in qwen3-1.7b-v2 llmic-v2; do
         cp artifacts/lora/$lora_model/per_char_report.md $PAPER_RESULTS/lora/$lora_model/ 2>/dev/null || true
         cp artifacts/lora/$lora_model/error_report.md $PAPER_RESULTS/lora/$lora_model/ 2>/dev/null || true
         cp artifacts/lora/$lora_model/config.yaml $PAPER_RESULTS/lora/$lora_model/ 2>/dev/null || true
+    fi
+done
+
+# Base LLMic_v2 (prompted ablation) -- copy whichever prompt variant performed better
+for variant in base-llmic-v2-singleline base-llmic-v2-fewshot; do
+    if [ -f artifacts/$variant/results.json ]; then
+        cp artifacts/$variant/results.json $PAPER_RESULTS/base-llmic-v2/${variant}_results.json
+        cp artifacts/$variant/per_char_report.md $PAPER_RESULTS/base-llmic-v2/${variant}_per_char_report.md 2>/dev/null || true
+        cp artifacts/$variant/error_report.md $PAPER_RESULTS/base-llmic-v2/${variant}_error_report.md 2>/dev/null || true
+        cp artifacts/$variant/examples.jsonl $PAPER_RESULTS/base-llmic-v2/${variant}_examples.jsonl 2>/dev/null || true
     fi
 done
 
@@ -176,6 +187,16 @@ for lora_name in ['qwen3-1.7b-v2', 'llmic-v2']:
     except:
         pass
 
+# Base LLMic_v2 ablation (no training, just inference)
+summaries['base-llmic-v2'] = {
+    'type': 'Base decoder (prompted, no fine-tuning)',
+    'model': 'faur-ai/LLMic_v2',
+    'params': '3B',
+    'hardware': 'M3 Ultra (MLX)',
+    'training': 'none',
+    'note': 'Ablation to isolate LoRA contribution from Romanian pretraining',
+}
+
 for model, summary in summaries.items():
     out_path = paper_results / model / 'training_summary.json'
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,7 +208,7 @@ for model, summary in summaries.items():
 echo "=== Committing paper repo ==="
 cd ~/codespace/phd/diacritics-finetuning-paper
 git add data/results/
-git commit -m "Add experimental results from all models (dictionary, BiLSTM, BERT, ByT5, prompting, LoRA)" 2>/dev/null || echo "Nothing to commit"
+git commit -m "Add experimental results from all models (dictionary, BiLSTM, BERT, ByT5, prompting, LoRA, base ablation)" 2>/dev/null || echo "Nothing to commit"
 git push 2>/dev/null || echo "Push failed (may need auth)"
 
 echo "=== Committing code repo ==="

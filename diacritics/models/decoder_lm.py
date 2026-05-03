@@ -14,6 +14,26 @@ logger = logging.getLogger(__name__)
 
 RESTORE_TEMPLATE = "Restore diacritics: {input}\n"
 
+RESTORE_PROMPT_FEWSHOT = """Restore Romanian diacritics in the following text.
+
+Input: Maine, cand rasare soarele, voi manca un mar si voi inghiti apa sifonata.
+Output: Mâine, când răsare soarele, voi mânca un măr și voi înghiți apă sifonată.
+
+Input: Aceasta este o propozitie fara diacritice care trebuie restaurata.
+Output: Aceasta este o propoziție fără diacritice care trebuie restaurată.
+
+Input: Tanarul a inteles ca viata e frumoasa si ca trebuie sa fie atent la fiecare clipa.
+Output: Tânărul a înțeles că viața e frumoasă și că trebuie să fie atent la fiecare clipă.
+
+Input: {input}
+Output: """
+
+
+PROMPT_STYLES = {
+    "single-line": RESTORE_TEMPLATE,
+    "fewshot": RESTORE_PROMPT_FEWSHOT,
+}
+
 
 def format_completion_pair(stripped: str, diacritized: str) -> dict:
     """Format a training pair for mlx_lm completions format."""
